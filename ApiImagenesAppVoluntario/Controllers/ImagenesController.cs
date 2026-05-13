@@ -954,6 +954,154 @@ namespace ApiImagenesAppVoluntario.Controllers
             }
         }
 
+        /// <summary>Actualiza la información de un banner (imagen y/o orden).</summary>
+        /// <response code="200">Banner actualizado exitosamente</response>
+        /// <response code="400">Error en la actualización</response>
+        [HttpPost("/ActualizarBanner")]
+        [SwaggerOperation("ActualizarBanner")]
+        [SwaggerResponse(StatusCodes.Status200OK)]
+        [SwaggerResponse(StatusCodes.Status400BadRequest)]
+        public IActionResult ActualizarBanner([FromBody] ActualizarBannerRequest request)
+        {
+            string apiKey = ControllerContext.HttpContext.Request.Headers["ApiKey"];
+            string direccionIP = ControllerContext.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            
+            try
+            {
+                // Validar que se haya enviado el id_banner
+                if (request.id_banner <= 0)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo id_banner es requerido y debe ser mayor a 0" });
+                }
+
+                // Validar que se haya enviado el guid_imagen
+                if (string.IsNullOrEmpty(request.guid_imagen))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo guid_imagen es requerido" });
+                }
+
+                // Validar formato de GUID
+                if (!Guid.TryParse(request.guid_imagen, out _))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El guid_imagen no tiene un formato válido" });
+                }
+
+                // Validar que el orden sea válido
+                if (request.orden <= 0)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo orden debe ser mayor a 0" });
+                }
+
+                // Validar que el campo activo sea válido (0 o 1)
+                if (request.activo != 0 && request.activo != 1)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo activo debe ser 0 o 1" });
+                }
+
+                // Preparar JSON para enviar a BD
+                var jsonEntrada = new
+                {
+                    id_banner = request.id_banner,
+                    guid_imagen = request.guid_imagen,
+                    orden = request.orden,
+                    activo = request.activo
+                };
+
+                string jsonDatosBanner = System.Text.Json.JsonSerializer.Serialize(jsonEntrada);
+                
+                LogHelper.RegistrarLog($"JSON Entrada a BD (ActualizarBanner): {jsonDatosBanner}");
+
+                // Llamar al procedimiento almacenado
+                Operacion.EsValidacionEnOrapro = true;
+                string jsonResultadoBD = Operacion.Ejecutar(
+                    apiKey,
+                    direccionIP,
+                    "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Actualizar_Banner",
+                    "p_json",
+                    jsonDatosBanner,
+                    "p_out_cursor"
+                );
+
+                LogHelper.RegistrarLog($"Respuesta BD (ActualizarBanner): {jsonResultadoBD}");
+
+                // Parsear respuesta de BD
+                JObject resultadoBD = JObject.Parse(jsonResultadoBD);
+                int exitoBD = resultadoBD["exito"]?.Value<int>() ?? 0;
+                string mensajeBD = resultadoBD["mensaje"]?.Value<string>() ?? "Sin mensaje";
+                int idBannerActualizado = resultadoBD["id_banner"]?.Value<int>() ?? 0;
+
+                if (exitoBD != 1)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new
+                    {
+                        error = "Error al actualizar el banner en la base de datos",
+                        mensaje = mensajeBD,
+                        detalle_bd = jsonResultadoBD
+                    });
+                }
+
+                var respuesta = new
+                {
+                    exito = exitoBD,
+                    mensaje = mensajeBD,
+                    id_banner = idBannerActualizado
+                };
+
+                return StatusCode(StatusCodes.Status200OK, respuesta);
+            }
+            catch (Newtonsoft.Json.JsonException jsonEx)
+            {
+                var errorDetails = new
+                {
+                    Message = "Error al procesar la respuesta de la base de datos",
+                    DetalleError = jsonEx.Message,
+                    StackTrace = jsonEx.StackTrace,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        IdBanner = request.id_banner,
+                        GuidImagen = request.guid_imagen,
+                        Orden = request.orden,
+                        Activo = request.activo,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Actualizar_Banner"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    error = "Error al procesar respuesta de la base de datos",
+                    details = jsonEx.Message
+                });
+            }
+            catch (Exception excepcion)
+            {
+                var errorDetails = new
+                {
+                    Message = excepcion.Message,
+                    StackTrace = excepcion.StackTrace,
+                    InnerException = excepcion.InnerException?.Message,
+                    Source = excepcion.Source,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        IdBanner = request.id_banner,
+                        GuidImagen = request.guid_imagen,
+                        Orden = request.orden,
+                        Activo = request.activo,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Actualizar_Banner"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status400BadRequest, new { error = excepcion.Message, details = excepcion.ToString() });
+            }
+        }
+
     }
 }
                            
