@@ -1102,6 +1102,376 @@ namespace ApiImagenesAppVoluntario.Controllers
             }
         }
 
+        /// <summary>Crea un banner de promoción con una imagen y retorna su información.</summary>
+        /// <response code="200">Banner de promoción creado exitosamente</response>
+        /// <response code="400">Error en la creación</response>
+        [HttpPost("/CrearBannerPromocion")]
+        [SwaggerOperation("CrearBannerPromocion")]
+        [SwaggerResponse(StatusCodes.Status200OK)]
+        [SwaggerResponse(StatusCodes.Status400BadRequest)]
+        public async Task<IActionResult> CrearBannerPromocion([FromForm] CrearBannerPromocionRequest request)
+        {
+            string apiKey = ControllerContext.HttpContext.Request.Headers["ApiKey"];
+            string direccionIP = ControllerContext.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            string rutaCompleta = string.Empty;
+            Guid guidImagen = Guid.NewGuid();
+
+            try
+            {
+                // Validar que se haya enviado un archivo
+                if (request.Archivo == null || request.Archivo.Length == 0)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "No se ha seleccionado ningún archivo" });
+                }
+
+                // Validar que sea una imagen
+                var extensionesPermitidas = new[] { ".jpg", ".jpeg", ".png", ".webp" };
+                var extension = Path.GetExtension(request.Archivo.FileName).ToLowerInvariant();
+
+                if (!extensionesPermitidas.Contains(extension))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El archivo debe ser una imagen (jpg, jpeg, png, webp)" });
+                }
+
+                // Validar campos adicionales del banner
+                if (string.IsNullOrEmpty(request.NombreBanner))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo nombre_banner es requerido" });
+                }
+
+                // Validar id_promocion
+                if (request.IdPromocion <= 0)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo id_promocion es requerido y debe ser mayor a 0" });
+                }
+
+                // Validar fecha_expiracion
+                if (string.IsNullOrEmpty(request.FechaExpiracion))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo fecha_expiracion es requerido" });
+                }
+
+                // Validar formato de fecha yyyy/mm/dd
+                if (!DateTime.TryParseExact(request.FechaExpiracion, "yyyy/MM/dd", null, System.Globalization.DateTimeStyles.None, out _))
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo fecha_expiracion debe tener el formato yyyy/MM/dd" });
+                }
+
+                // Obtener el directorio de configuración para promociones
+                string directorioImagenes = _configuracion["DirectorioImagenesPromocion"];
+                string direccionPublica = _configuracion["DireccionImagenesPublica"];
+
+                if (string.IsNullOrEmpty(directorioImagenes))
+                {
+                    return StatusCode(StatusCodes.Status500InternalServerError, new { error = "No se ha configurado el directorio de imágenes de promoción en appsettings.json" });
+                }
+
+                // Crear el directorio si no existe
+                if (!Directory.Exists(directorioImagenes))
+                {
+                    Directory.CreateDirectory(directorioImagenes);
+                }
+
+                // Usar el guidImagen para el nombre del archivo
+                string nombreArchivo = $"{guidImagen}{extension}";
+                rutaCompleta = Path.Combine(directorioImagenes, nombreArchivo);
+
+                // Guardar el archivo
+                using (var stream = new FileStream(rutaCompleta, FileMode.Create))
+                {
+                    await request.Archivo.CopyToAsync(stream);
+                }
+
+                // Obtener dimensiones y peso de la imagen
+                int ancho = 0;
+                int alto = 0;
+                long peso = new FileInfo(rutaCompleta).Length;
+
+                // Obtener dimensiones
+                var dimensiones = _imagenService.ObtenerDimensionesImagen(rutaCompleta);
+                ancho = dimensiones.ancho;
+                alto = dimensiones.alto;
+
+                // Construir la URL pública
+                string urlPublica = direccionPublica?.TrimEnd('/') + "/" + nombreArchivo;
+
+                // Preparar datos del banner de promoción con los campos adicionales
+                var datosBannerPromocion = new
+                {
+                    guid_imagen = guidImagen.ToString(),
+                    url = urlPublica,
+                    id_tipo_imagen = request.IdTipoImagen,
+                    alt_text = request.AltText ?? Path.GetFileNameWithoutExtension(request.Archivo.FileName),
+                    alto = alto,
+                    ancho = ancho,
+                    peso = peso,
+                    version = request.Version,
+                    nombre_banner = request.NombreBanner,
+                    orden = request.Orden,
+                    id_promocion = request.IdPromocion,
+                    fecha_expiracion = request.FechaExpiracion
+                };
+
+                // Serializar a JSON para enviar al procedimiento almacenado
+                string jsonDatosBannerPromocion = System.Text.Json.JsonSerializer.Serialize(datosBannerPromocion);
+
+                LogHelper.RegistrarLog($"JSON Entrada a BD (CrearBannerPromocion): {jsonDatosBannerPromocion}");
+
+                // Registrar en la base de datos
+                Operacion.EsValidacionEnOrapro = true;
+                string jsonResultadoBD = Operacion.Ejecutar(
+                    apiKey,
+                    direccionIP,
+                    "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Crear_Banner_Promocion",
+                    "p_json",
+                    jsonDatosBannerPromocion,
+                    "p_out_cursor"
+                );
+
+                LogHelper.RegistrarLog($"Banner de promoción creado exitosamente: {nombreArchivo} - URL: {urlPublica}");
+                LogHelper.RegistrarLog($"Respuesta BD (CrearBannerPromocion): {jsonResultadoBD}");
+
+                // Verificar que el registro en BD fue exitoso
+                JObject resultadoBD = JObject.Parse(jsonResultadoBD);
+                int exitoBD = resultadoBD["exito"]?.Value<int>() ?? 0;
+                string mensajeBD = resultadoBD["mensaje"]?.Value<string>() ?? "Sin mensaje";
+
+                if (exitoBD != 1)
+                {
+                    // Si hubo error en BD, eliminar el archivo físico
+                    if (System.IO.File.Exists(rutaCompleta))
+                    {
+                        System.IO.File.Delete(rutaCompleta);
+                        LogHelper.RegistrarLog($"Archivo eliminado debido a error en BD: {nombreArchivo}");
+                    }
+
+                    return StatusCode(StatusCodes.Status400BadRequest, new
+                    {
+                        error = "Error al crear el banner de promoción en la base de datos",
+                        mensaje = mensajeBD,
+                        detalle_bd = jsonResultadoBD
+                    });
+                }
+
+                // Preparar respuesta con información del banner de promoción creado
+                var respuesta = new
+                {
+                    exito = exitoBD,
+                    mensaje = mensajeBD,
+                    id_banner_promocion = resultadoBD["id_banner_promocion"]?.Value<int>() ?? 0,
+                    guid_imagen = guidImagen.ToString(),
+                    url = urlPublica,
+                    id_tipo_imagen = request.IdTipoImagen,
+                    alt_text = request.AltText ?? Path.GetFileNameWithoutExtension(request.Archivo.FileName),
+                    alto = alto,
+                    ancho = ancho,
+                    peso = peso,
+                    version = request.Version,
+                    nombre_banner = request.NombreBanner,
+                    orden = request.Orden,
+                    id_promocion = request.IdPromocion,
+                    fecha_expiracion = request.FechaExpiracion,
+                    nombre_archivo = nombreArchivo,
+                    fecha_carga = DateTime.Now,
+                    registrado_bd = true
+                };
+
+                return StatusCode(StatusCodes.Status200OK, respuesta);
+            }
+            catch (Newtonsoft.Json.JsonException jsonEx)
+            {
+                // Error al parsear la respuesta de la BD - eliminar archivo
+                if (!string.IsNullOrEmpty(rutaCompleta) && System.IO.File.Exists(rutaCompleta))
+                {
+                    System.IO.File.Delete(rutaCompleta);
+                    LogHelper.RegistrarLog($"Archivo eliminado debido a error de JSON en respuesta BD: {rutaCompleta}");
+                }
+
+                var errorDetails = new
+                {
+                    Message = "Error al procesar la respuesta de la base de datos",
+                    DetalleError = jsonEx.Message,
+                    StackTrace = jsonEx.StackTrace,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        NombreArchivo = request?.Archivo?.FileName,
+                        GuidImagen = guidImagen.ToString(),
+                        NombreBanner = request?.NombreBanner,
+                        Orden = request?.Orden,
+                        IdPromocion = request?.IdPromocion,
+                        FechaExpiracion = request?.FechaExpiracion,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Crear_Banner_Promocion"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    error = "Error al procesar respuesta de la base de datos",
+                    details = jsonEx.Message
+                });
+            }
+            catch (Exception excepcion)
+            {
+                // Error general - eliminar archivo si existe
+                if (!string.IsNullOrEmpty(rutaCompleta) && System.IO.File.Exists(rutaCompleta))
+                {
+                    try
+                    {
+                        System.IO.File.Delete(rutaCompleta);
+                        LogHelper.RegistrarLog($"Archivo eliminado debido a excepción: {rutaCompleta}");
+                    }
+                    catch (Exception deleteEx)
+                    {
+                        LogHelper.RegistrarLog($"Error al eliminar archivo: {deleteEx.Message}");
+                    }
+                }
+
+                var errorDetails = new
+                {
+                    Message = excepcion.Message,
+                    StackTrace = excepcion.StackTrace,
+                    InnerException = excepcion.InnerException?.Message,
+                    Source = excepcion.Source,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        NombreArchivo = request?.Archivo?.FileName,
+                        IdTipoImagen = request?.IdTipoImagen,
+                        GuidImagen = guidImagen.ToString(),
+                        NombreBanner = request?.NombreBanner,
+                        Orden = request?.Orden,
+                        IdPromocion = request?.IdPromocion,
+                        FechaExpiracion = request?.FechaExpiracion,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Crear_Banner_Promocion"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status400BadRequest, new { error = excepcion.Message, details = excepcion.ToString() });
+            }
+        }
+
+        /// <summary>Elimina un banner de promoción de la base de datos. Elimina solo la información del banner de promoción y su relación con una imagen. NO ELIMINA IMAGEN</summary>
+        /// <response code="200">Banner de promoción eliminado exitosamente</response>
+        /// <response code="400">Error en la eliminación</response>
+        [HttpPost("/EliminarBannerPromocion")]
+        [SwaggerOperation("EliminarBannerPromocion")]
+        [SwaggerResponse(StatusCodes.Status200OK)]
+        [SwaggerResponse(StatusCodes.Status400BadRequest)]
+        public IActionResult EliminarBannerPromocion([FromBody] EliminarBannerPromocionRequest request)
+        {
+            string apiKey = ControllerContext.HttpContext.Request.Headers["ApiKey"];
+            string direccionIP = ControllerContext.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            
+            try
+            {
+                // Validar que se haya enviado el id_banner_promocion
+                if (request.id_banner_promocion <= 0)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new { error = "El campo id_banner_promocion es requerido y debe ser mayor a 0" });
+                }
+
+                // Preparar JSON para enviar a BD
+                var jsonEntrada = new
+                {
+                    id_banner_promocion = request.id_banner_promocion.ToString()
+                };
+
+                string jsonDatosBannerPromocion = System.Text.Json.JsonSerializer.Serialize(jsonEntrada);
+                
+                LogHelper.RegistrarLog($"JSON Entrada a BD (EliminarBannerPromocion): {jsonDatosBannerPromocion}");
+
+                // Llamar al procedimiento almacenado
+                Operacion.EsValidacionEnOrapro = true;
+                string jsonResultadoBD = Operacion.Ejecutar(
+                    apiKey,
+                    direccionIP,
+                    "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Eliminar_Banner_Promocion",
+                    "p_json",
+                    jsonDatosBannerPromocion,
+                    "p_out_cursor"
+                );
+
+                LogHelper.RegistrarLog($"Respuesta BD (EliminarBannerPromocion): {jsonResultadoBD}");
+
+                // Parsear respuesta de BD
+                JObject resultadoBD = JObject.Parse(jsonResultadoBD);
+                int exitoBD = resultadoBD["exito"]?.Value<int>() ?? 0;
+                string mensajeBD = resultadoBD["mensaje"]?.Value<string>() ?? "Sin mensaje";
+                int idBannerPromocionEliminado = resultadoBD["id_banner_promocion"]?.Value<int>() ?? 0;
+
+                if (exitoBD != 1)
+                {
+                    return StatusCode(StatusCodes.Status400BadRequest, new
+                    {
+                        error = "Error al eliminar el banner de promoción de la base de datos",
+                        mensaje = mensajeBD,
+                        detalle_bd = jsonResultadoBD
+                    });
+                }
+
+                var respuesta = new
+                {
+                    exito = exitoBD,
+                    mensaje = mensajeBD,
+                    id_banner_promocion = idBannerPromocionEliminado
+                };
+
+                return StatusCode(StatusCodes.Status200OK, respuesta);
+            }
+            catch (Newtonsoft.Json.JsonException jsonEx)
+            {
+                var errorDetails = new
+                {
+                    Message = "Error al procesar la respuesta de la base de datos",
+                    DetalleError = jsonEx.Message,
+                    StackTrace = jsonEx.StackTrace,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        IdBannerPromocion = request.id_banner_promocion,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Eliminar_Banner_Promocion"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    error = "Error al procesar respuesta de la base de datos",
+                    details = jsonEx.Message
+                });
+            }
+            catch (Exception excepcion)
+            {
+                var errorDetails = new
+                {
+                    Message = excepcion.Message,
+                    StackTrace = excepcion.StackTrace,
+                    InnerException = excepcion.InnerException?.Message,
+                    Source = excepcion.Source,
+                    Parameters = new
+                    {
+                        ApiKey = apiKey?.Substring(0, Math.Min(5, apiKey?.Length ?? 0)) + "...",
+                        DireccionIP = direccionIP,
+                        IdBannerPromocion = request.id_banner_promocion,
+                        Procedimiento = "SVMOVIL.PCK_AC_CONTROL_IMAGENES.Eliminar_Banner_Promocion"
+                    }
+                };
+
+                LogHelper.RegistrarLog(System.Text.Json.JsonSerializer.Serialize(errorDetails, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
+                return StatusCode(StatusCodes.Status400BadRequest, new { error = excepcion.Message, details = excepcion.ToString() });
+            }
+        }
+
     }
 }
                            
